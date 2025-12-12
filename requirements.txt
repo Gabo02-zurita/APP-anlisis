@@ -1,8 +1,5 @@
 streamlit
-numpy
-matplotlib
-plotly
-scipy
-streamlit-folium
 pandas
-time.sleep
+numpy
+folium
+streamlit-folium
