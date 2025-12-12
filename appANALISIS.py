@@ -315,3 +315,7 @@ else:
     if st.button("▶️ INICIAR ACTIVIDAD", type="primary", use_container_width=True):
         st.session_state['actividad_iniciada'] = True
         st.rerun()
+    st.write(" ")
+    if st.button("▶️ INICIAR ACTIVIDAD", type="primary", use_container_width=True):
+        st.session_state['actividad_iniciada'] = True
+        st.rerun()
