@@ -3,5 +3,5 @@ numpy
 matplotlib
 plotly
 scipy
-folium
+streamlit-folium
 pandas
