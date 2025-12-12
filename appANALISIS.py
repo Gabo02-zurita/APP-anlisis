@@ -10,7 +10,8 @@ from streamlit_folium import folium_static
 # --- Configuración y Datos Estáticos ---
 TOTAL_SEGUNDOS = 2560 
 DISTANCIA_TOTAL_KM = 5.0 
-MAPA_ACTUALIZAR_CADA = 5 # El mapa se actualiza cada 5 puntos.
+MAPA_ACTUALIZAR_CADA = 5 
+NUM_PUNTOS_SIMULACION = 50
 
 st.set_page_config(layout="wide", page_title="🏃 App Fitness - Historial y Récords")
 st.markdown("""
@@ -21,10 +22,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 1. Funciones de Simulación y Cálculo (Se mantienen sin cambios) ---
+# --- 1. Funciones de Simulación y Cálculo ---
 
 @st.cache_data
-def generar_datos_actividad(num_puntos=50):
+def generar_datos_actividad(num_puntos=NUM_PUNTOS_SIMULACION):
+    """Genera datos estáticos de la actividad. Se ejecuta una sola vez."""
     lat_base, lon_base = -1.2683, -78.6186
     data = {
         'Tiempo_Segundos': np.linspace(0, TOTAL_SEGUNDOS, num_puntos), 
@@ -39,13 +41,38 @@ def generar_datos_actividad(num_puntos=50):
     return df
 
 def calcular_metricas_acumuladas(df_parcial, punto_actual, tiempo_en_movimiento_seg):
+    """Calcula las métricas principales según el índice actual."""
+    
+    # Manejar el caso donde el punto actual excede los datos disponibles
+    if punto_actual >= len(df_parcial):
+        punto_actual = len(df_parcial)
+        
     df_actual = df_parcial.iloc[:punto_actual].copy()
+    
+    # Si estamos en el punto 0, inicializamos las métricas
+    if punto_actual == 0:
+        return {
+            "Fecha": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+            "Distancia (km)": 0.0,
+            "Duración (seg)": 0,
+            "Ritmo Medio (s/km)": 0,
+            "Calorías (kcal)": 0,
+            "Tiempo Movimiento (s)": 0
+        }
+
     duracion_seg = df_actual['Tiempo_Segundos'].iloc[-1]
     distancia_km = (duracion_seg / TOTAL_SEGUNDOS) * DISTANCIA_TOTAL_KM
     
+    # Calcular el tiempo de movimiento hasta este punto
+    tiempo_movimiento_total = 0
+    for i in range(1, punto_actual):
+        intervalo_tiempo = df_parcial['Tiempo_Segundos'].iloc[i] - df_parcial['Tiempo_Segundos'].iloc[i-1]
+        if df_parcial['Ritmo_Inst_Seg_Km'].iloc[i] < 900:
+            tiempo_movimiento_total += intervalo_tiempo
+            
     ritmo_promedio_seg_km = 0
-    if distancia_km > 0 and tiempo_en_movimiento_seg > 0:
-        ritmo_promedio_seg_km = tiempo_en_movimiento_seg / distancia_km
+    if distancia_km > 0 and tiempo_movimiento_total > 0:
+        ritmo_promedio_seg_km = tiempo_movimiento_total / distancia_km
 
     calorias_quemadas = int(distancia_km * 50)
     
@@ -55,12 +82,15 @@ def calcular_metricas_acumuladas(df_parcial, punto_actual, tiempo_en_movimiento_
         "Duración (seg)": int(duracion_seg),
         "Ritmo Medio (s/km)": ritmo_promedio_seg_km,
         "Calorías (kcal)": calorias_quemadas,
-        "Tiempo Movimiento (s)": int(tiempo_en_movimiento_seg)
+        "Tiempo Movimiento (s)": int(tiempo_movimiento_total)
     }
 
 def formatear_metricas_visual(metricas_dict):
-    ritmo_min = int(metricas_dict["Ritmo Medio (s/km)"] // 60)
-    ritmo_seg = int(metricas_dict["Ritmo Medio (s/km)"] % 60)
+    """Formatea los valores para la visualización en la interfaz."""
+    ritmo_s_km = metricas_dict.get("Ritmo Medio (s/km)", 0)
+    
+    ritmo_min = int(ritmo_s_km // 60)
+    ritmo_seg = int(ritmo_s_km % 60)
     
     return {
         "Distancia (km)": f"{metricas_dict['Distancia (km)']:.2f}",
@@ -69,15 +99,20 @@ def formatear_metricas_visual(metricas_dict):
         "Calorías [kcal]": str(metricas_dict['Calorías (kcal)'])
     }
 
-# --- 2. Funciones de Gestión de Historial y Récords (Se mantienen sin cambios) ---
+# --- 2. Funciones de Gestión de Estado (Historial y Récords) ---
 
 def inicializar_estado():
     if 'actividad_iniciada' not in st.session_state:
         st.session_state['actividad_iniciada'] = False
         st.session_state['actividad_finalizada'] = False
     
+    if 'indice_simulacion' not in st.session_state:
+        st.session_state['indice_simulacion'] = 0 # Nuevo contador para el avance
+
     if 'historial_actividades' not in st.session_state:
-        st.session_state['historial_actividades'] = pd.DataFrame(columns=["Fecha", "Distancia (km)", "Duración (seg)", "Ritmo Medio (s/km)", "Calorías (kcal)", "Tiempo Movimiento (s)"])
+        st.session_state['historial_actividades'] = pd.DataFrame(columns=[
+            "Fecha", "Distancia (km)", "Duración (seg)", "Ritmo Medio (s/km)", "Calorías (kcal)", "Tiempo Movimiento (s)"
+        ])
         if st.session_state['historial_actividades'].empty:
              st.session_state['historial_actividades'] = pd.DataFrame([{
                  "Fecha": "2025-12-01 10:00", "Distancia (km)": 4.0, "Duración (seg)": 1500, "Ritmo Medio (s/km)": 375, "Calorías (kcal)": 200, "Tiempo Movimiento (s)": 1500
@@ -95,8 +130,31 @@ def guardar_actividad(metricas_finales):
     st.session_state['ultimas_metricas'] = metricas_finales
     st.session_state['actividad_finalizada'] = True
     st.session_state['actividad_iniciada'] = False
+    st.session_state['indice_simulacion'] = 0 # Reiniciar contador al finalizar
+
+def avanzar_simulacion():
+    """Incrementa el índice y fuerza el redibujado."""
+    if st.session_state['indice_simulacion'] < NUM_PUNTOS_SIMULACION:
+        st.session_state['indice_simulacion'] += 1
+        st.rerun()
+
+def finalizar_actividad_manual(df_actividad):
+    """Calcula y guarda el estado actual al finalizar manualmente."""
+    indice_actual = st.session_state['indice_simulacion']
+    
+    # Recalculamos el tiempo de movimiento hasta el punto actual
+    tiempo_movimiento_final = 0
+    for i in range(1, indice_actual + 1):
+        intervalo_tiempo = df_actividad['Tiempo_Segundos'].iloc[i] - df_actividad['Tiempo_Segundos'].iloc[i-1]
+        if df_actividad['Ritmo_Inst_Seg_Km'].iloc[i] < 900:
+            tiempo_movimiento_final += intervalo_tiempo
+            
+    metricas_finales = calcular_metricas_acumuladas(df_actividad, indice_actual, tiempo_movimiento_final)
+    guardar_actividad(metricas_finales)
+    st.rerun()
 
 def calcular_records():
+    # Lógica de cálculo de récords (se mantiene igual)
     historial = st.session_state['historial_actividades'].copy()
     if historial.empty:
         return []
@@ -104,129 +162,123 @@ def calcular_records():
     rp_logrados = []
     ultima_actividad = st.session_state['ultimas_metricas']
     
-    # Récord: Distancia más larga
     max_distancia_historica = historial['Distancia (km)'].max()
     if ultima_actividad['Distancia (km)'] >= max_distancia_historica and ultima_actividad['Distancia (km)'] > historial.iloc[-2]['Distancia (km)']:
          rp_logrados.append(f"Distancia más larga: {ultima_actividad['Distancia (km)']:.2f} km")
          
-    # Récord: Ritmo más rápido (Simulado para 5K)
     candidatos_5k = historial[(historial['Distancia (km)'] >= 4.5) & (historial['Distancia (km)'] <= 5.5)]
     if not candidatos_5k.empty:
         mejor_ritmo_seg = candidatos_5k['Ritmo Medio (s/km)'].min()
         
-        if ultima_actividad['Ritmo Medio (s/km)'] < mejor_ritmo_seg:
+        if ultima_actividad['Ritmo Medio (s/km)'] < mejor_ritmo_seg and ultima_actividad['Ritmo Medio (s/km)'] > 0:
              min_r = int(ultima_actividad['Ritmo Medio (s/km)'] // 60)
              sec_r = int(ultima_actividad['Ritmo Medio (s/km)'] % 60)
              rp_logrados.append(f"Mejor Ritmo en 5K: {min_r:02d}:{sec_r:02d} /km")
 
     return rp_logrados
 
-# --- 3. Renderizado de Interfaz ---
+# --- 3. Renderizado de Interfaz (Optimizado para Estabilidad) ---
 
 def renderizar_interfaz_seguimiento():
-    """
-    Bucle principal para la simulación en tiempo real.
-    Estructura optimizada para evitar el error 'removeChild'.
-    """
-    st.title("🟢 ACTIVIDAD EN CURSO (Tiempo Real)")
+    """Interfaz de seguimiento reactiva, sin bucle 'for'."""
+    st.title("🟢 ACTIVIDAD EN CURSO (Simulación Estática)")
     
-    df_actividad = generar_datos_actividad(num_puntos=50) 
-    num_puntos = len(df_actividad)
+    df_actividad = generar_datos_actividad(num_puntos=NUM_PUNTOS_SIMULACION) 
+    i = st.session_state['indice_simulacion'] # Usamos el índice de la sesión
+
+    # Calcular el tiempo de movimiento hasta el punto actual (necesario fuera del bucle)
+    tiempo_en_movimiento = 0
+    if i > 0:
+        for k in range(1, i + 1):
+            intervalo_tiempo = df_actividad['Tiempo_Segundos'].iloc[k] - df_actividad['Tiempo_Segundos'].iloc[k-1]
+            if df_actividad['Ritmo_Inst_Seg_Km'].iloc[k] < 900:
+                tiempo_en_movimiento += intervalo_tiempo
     
-    # 🛑 CAMBIO CLAVE: Usamos st.empty() para los placehoders sin anidamiento de st.container()
-    metricas_placeholder = st.empty()
-    mapa_placeholder = st.empty()
-    controles_placeholder = st.empty() # Placeholder para los botones
+    metricas_crudo = calcular_metricas_acumuladas(df_actividad, i, tiempo_en_movimiento)
+    metricas_visual = formatear_metricas_visual(metricas_crudo)
     
-    tiempo_en_movimiento = 0.0
+    # Determinar el estado para la visualización
+    if i == 0:
+        estado_pausa = "ESPERANDO INICIO"
+    elif df_actividad['Ritmo_Inst_Seg_Km'].iloc[i-1] < 900:
+        estado_pausa = "RUNNING"
+    else:
+        estado_pausa = "PAUSA AUTOMÁTICA"
 
-    # Bucle de simulación
-    for i in range(1, num_puntos):
+    # --- 3.1. Dibujar Métricas (Estructura más simple) ---
+    st.markdown(f"**Estado:** {estado_pausa} | Tiempo Total: {metricas_visual['Duración']}")
+    
+    # Contenedor para Distancia (Formato Grande)
+    col_distancia, _, _, _ = st.columns([1, 1, 1, 1])
+    col_distancia.markdown(
+        f"<p style='font-size: 4em; font-weight: bold; text-align: center; line-height: 0.9;'>{metricas_visual['Distancia (km)']}</p>", unsafe_allow_html=True
+    )
+    col_distancia.markdown(
+        f"<p style='font-size: 1em; text-align: center; margin-top: -10px;'>Distancia [km]</p>", unsafe_allow_html=True
+    )
+
+    # Contenedor para el resto de métricas (Fila inferior)
+    cols_inferiores = st.columns([1, 1, 1])
+    cols_inferiores[0].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Ritmo medio (min/km)']}</p>", unsafe_allow_html=True)
+    cols_inferiores[0].markdown("<p style='font-size: 0.9em; text-align: center;'>Ritmo medio (min/km)</p>", unsafe_allow_html=True)
+    
+    cols_inferiores[1].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Calorías [kcal]']}</p>", unsafe_allow_html=True)
+    cols_inferiores[1].markdown("<p style='font-size: 0.9em; text-align: center;'>Calorías [kcal]</p>", unsafe_allow_html=True)
+    
+    cols_inferiores[2].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Duración']}</p>", unsafe_allow_html=True)
+    cols_inferiores[2].markdown("<p style='font-size: 0.9em; text-align: center;'>Duración</p>", unsafe_allow_html=True)
+    st.markdown("---")
+
+
+    # --- 3.2. Dibujar Mapa (Solo en ciertas condiciones) ---
+    st.subheader("Ruta en Tiempo Real con Intensidad")
+    
+    if i % MAPA_ACTUALIZAR_CADA == 0 and i > 0: # Solo actualizamos si el índice lo permite y no es el inicio
+        df_ruta_parcial = df_actividad.iloc[:i]
+        coords_actuales = [df_ruta_parcial['Latitud'].iloc[-1], df_ruta_parcial['Longitud'].iloc[-1]]
         
-        intervalo_tiempo = df_actividad['Tiempo_Segundos'].iloc[i] - df_actividad['Tiempo_Segundos'].iloc[i-1]
+        m = folium.Map(location=coords_actuales, zoom_start=15, tiles="cartodbpositron", height=400)
         
-        # Pausa Automática Lógica
-        if df_actividad['Ritmo_Inst_Seg_Km'].iloc[i] < 900:
-            tiempo_en_movimiento += intervalo_tiempo
-            estado_pausa = "RUNNING"
-        else:
-            estado_pausa = "PAUSA AUTOMÁTICA"
+        # Mapa de Calor y Polilínea
+        df_heatmap_parcial = df_ruta_parcial[['Latitud', 'Longitud']]
+        data_heatmap = [[row['Latitud'], row['Longitud'], 1] for index, row in df_heatmap_parcial.iterrows()]
+        HeatMap(data_heatmap, radius=15).add_to(m)
+        folium.PolyLine(df_ruta_parcial[['Latitud', 'Longitud']].values, color="blue", weight=3, opacity=0.8).add_to(m)
+        folium.Marker(coords_actuales, tooltip="Tú aquí", icon=folium.Icon(color="red", icon="circle", prefix='fa')).add_to(m)
+
+        folium_static(m, width=700, height=400)
         
-        # Calcular Métricas Acumuladas
-        metricas_crudo = calcular_metricas_acumuladas(df_actividad, i + 1, tiempo_en_movimiento)
-        metricas_visual = formatear_metricas_visual(metricas_crudo)
+    else:
+        st.info(f"Mapa estático. Se actualizará en el punto de datos {i + 1} de {NUM_PUNTOS_SIMULACION}.")
+    
+    st.markdown("---")
+
+    # --- 3.3. Controles de Avance y Finalización ---
+    
+    if i < NUM_PUNTOS_SIMULACION:
+        col_pausa, col_finalizar, col_avance = st.columns([1, 1, 1])
         
-        # --- Dibujar Métricas Dinámicamente (Actualización rápida) ---
-        with metricas_placeholder:
-            st.markdown(f"**Estado:** {estado_pausa} | Tiempo Total: {metricas_visual['Duración']}")
+        if col_pausa.button("🔴 PAUSA", key="pausa_manual"):
+             st.warning("Pausa manual activada. Avanza la simulación para continuar.")
+             # No forzamos rerun, simplemente esperamos el siguiente evento.
+        
+        if col_finalizar.button("✅ FINALIZAR Y GUARDAR", type="primary"):
+            finalizar_actividad_manual(df_actividad)
+        
+        # Este botón reemplaza el bucle time.sleep
+        if col_avance.button(f"▶️ AVANZAR SIMULACIÓN ({i+1}/{NUM_PUNTOS_SIMULACION})"):
+            avanzar_simulacion()
             
-            # Diseño de la imagen proporcionada (Distancia grande, el resto abajo)
-            col_distancia, _, _, _ = st.columns([1, 1, 1, 1])
-            col_distancia.markdown(
-                f"<p style='font-size: 4em; font-weight: bold; text-align: center; line-height: 0.9;'>{metricas_visual['Distancia (km)']}</p>", unsafe_allow_html=True
-            )
-            col_distancia.markdown(
-                f"<p style='font-size: 1em; text-align: center; margin-top: -10px;'>Distancia [km]</p>", unsafe_allow_html=True
-            )
-
-            cols_inferiores = st.columns([1, 1, 1])
-            cols_inferiores[0].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Ritmo medio (min/km)']}</p>", unsafe_allow_html=True)
-            cols_inferiores[0].markdown("<p style='font-size: 0.9em; text-align: center;'>Ritmo medio (min/km)</p>", unsafe_allow_html=True)
+    else:
+        # Si la simulación ha llegado al final, guardamos y vamos a análisis
+        if not st.session_state['actividad_finalizada']:
+            finalizar_actividad_manual(df_actividad)
             
-            cols_inferiores[1].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Calorías [kcal]']}</p>", unsafe_allow_html=True)
-            cols_inferiores[1].markdown("<p style='font-size: 0.9em; text-align: center;'>Calorías [kcal]</p>", unsafe_allow_html=True)
-            
-            cols_inferiores[2].markdown(f"<p style='font-size: 2.5em; font-weight: bold; text-align: center; line-height: 1.0;'>{metricas_visual['Duración']}</p>", unsafe_allow_html=True)
-            cols_inferiores[2].markdown("<p style='font-size: 0.9em; text-align: center;'>Duración</p>", unsafe_allow_html=True)
-            st.markdown("---")
+        st.success("Actividad Finalizada. ¡Revisa el Análisis y Estadísticas!")
 
-
-        # --- Dibujar el Mapa Dinámicamente (Corrección clave: solo actualizar de vez en cuando) ---
-        if i % MAPA_ACTUALIZAR_CADA == 0 or i == num_puntos - 1:
-            with mapa_placeholder:
-                st.subheader("Ruta en Tiempo Real con Intensidad")
-                df_ruta_parcial = df_actividad.iloc[:i+1]
-                coords_actuales = [df_ruta_parcial['Latitud'].iloc[-1], df_ruta_parcial['Longitud'].iloc[-1]]
-                
-                m = folium.Map(location=coords_actuales, zoom_start=15, tiles="cartodbpositron", height=400)
-
-                # Mapa de Calor (Intensidad simulada)
-                df_heatmap_parcial = df_ruta_parcial[['Latitud', 'Longitud']]
-                data_heatmap = [[row['Latitud'], row['Longitud'], 1] for index, row in df_heatmap_parcial.iterrows()]
-                HeatMap(data_heatmap, radius=15).add_to(m)
-                
-                folium.PolyLine(df_ruta_parcial[['Latitud', 'Longitud']].values, color="blue", weight=3, opacity=0.8).add_to(m)
-                
-                folium.Marker(coords_actuales, tooltip="Tú aquí", icon=folium.Icon(color="red", icon="circle", prefix='fa')).add_to(m)
-
-                folium_static(m, width=700, height=400)
-                
-
-
-        # Controles (Actualización rápida)
-        with controles_placeholder:
-            col_pausa, col_finalizar = st.columns(2)
-            # 🛑 CLAVE: Para evitar el error de los botones, deben tener un 'key' único 
-            # y se deben envolver en el placeholder para su redibujado
-            if col_pausa.button("🔴 PAUSA", key=f"pausa_loop_{i}"):
-                st.warning("Pausa manual activada.")
-                guardar_actividad(metricas_crudo) # Guardamos el progreso antes de salir
-                st.rerun()
-            
-            if col_finalizar.button("✅ FINALIZAR", key=f"finalizar_loop_{i}"):
-                guardar_actividad(metricas_crudo)
-                st.rerun()
-
-        time.sleep(0.2)
-        
-    # Si el bucle termina normalmente
-    if i == num_puntos - 1 and st.session_state['actividad_iniciada']:
-        guardar_actividad(metricas_crudo)
-        st.rerun()
-        
 
 def renderizar_pantalla_analisis():
-    """Muestra el resumen, el historial y los récords al finalizar la actividad."""
+    # Lógica de renderizado del análisis (se mantiene igual)
     
     st.title("✅ Análisis y Estadísticas de la Sesión")
     
@@ -309,13 +361,10 @@ else:
     # Pantalla de Inicio
     st.title("🏃 Aplicación de Seguimiento Deportivo")
     st.markdown("### ¡Tu entrenador personal y comunidad de running te esperan!")
-    st.markdown("Esta simulación incluye: **Seguimiento GPS, Historial de Actividad, Récords Personales** y funciones **Premium**.")
+    st.markdown("Esta simulación es **extremadamente estable** y evita errores de *redibujado* al basarse en clicks para avanzar la actividad.")
     st.image("https://images.unsplash.com/photo-1571026079085-306915f0134f?fit=crop&w=800&q=80") 
     st.write(" ")
     if st.button("▶️ INICIAR ACTIVIDAD", type="primary", use_container_width=True):
         st.session_state['actividad_iniciada'] = True
-        st.rerun()
-    st.write(" ")
-    if st.button("▶️ INICIAR ACTIVIDAD", type="primary", use_container_width=True):
-        st.session_state['actividad_iniciada'] = True
+        st.session_state['indice_simulacion'] = 0 # Asegurar inicio en 0
         st.rerun()
